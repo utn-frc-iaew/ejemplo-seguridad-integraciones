@@ -1,4 +1,4 @@
-# oauth-auth0-lab
+# Ejemplo Seguridad en Integraciones
 
 Monorepo educativo que contiene varios escenarios prácticos de OAuth2 / OpenID Connect usando Auth0.
 
@@ -10,47 +10,6 @@ El laboratorio está pensado para estudiantes y desarrolladores que quieran:
 - Ver la diferencia entre flujos con y sin usuario.
 - Entender seguridad: firma de tokens (RS256), validación con JWKS, scopes y audiencias.
 - Probar patrones de arquitectura (BFF, SPA + RS, M2M).
-
-## Arquitectura OAuth 2.0 - Visión General
-
-```mermaid
-graph TB
-    subgraph "OAuth 2.0 Ecosystem"
-        RO[Resource Owner<br/>👤 Usuario]
-        Client[Client Application<br/>📱 Web/Mobile/Desktop App]
-        AS[Authorization Server<br/>🔐 Auth0/Okta/Keycloak]
-        RS[Resource Server<br/>🏗️ API/Backend Service]
-    end
-    
-    subgraph "Authorization Flows"
-        AC[Authorization Code<br/>🔒 Server-side Apps]
-        PKCE[Authorization Code + PKCE<br/>📱 SPAs & Mobile]
-        CC[Client Credentials<br/>🤖 Machine-to-Machine]
-        IMP[Implicit Flow<br/>⚠️ Deprecated]
-        ROPC[Resource Owner Password<br/>❌ Legacy Only]
-    end
-    
-    RO -->|1. Consent| AS
-    Client -->|2. Authorization Request| AS
-    AS -->|3. Authorization Grant| Client
-    Client -->|4. Access Token Request| AS
-    AS -->|5. Access Token| Client
-    Client -->|6. Protected Resource Request| RS
-    RS -->|7. Protected Resource| Client
-    
-    AC -.-> Client
-    PKCE -.-> Client
-    CC -.-> Client
-    IMP -.-> Client
-    ROPC -.-> Client
-    
-    style AS fill:#e1f5fe
-    style RS fill:#f3e5f5
-    style RO fill:#fff3e0
-    style Client fill:#e8f5e8
-    style IMP fill:#ffebee
-    style ROPC fill:#ffebee
-```
 
 ## Fundamentos Teóricos
 
@@ -461,7 +420,302 @@ flowchart TD
     style Reject fill:#f44336
 ```
 
-### 🔒 Mejores Prácticas de Seguridad
+### � Mutual TLS (mTLS) - Autenticación Bidireccional
+
+mTLS (Mutual Transport Layer Security) extiende TLS tradicional requiriendo autenticación **bidireccional**: tanto el cliente como el servidor deben presentar y validar certificados digitales.
+
+#### TLS vs mTLS Comparison
+
+```mermaid
+sequenceDiagram
+    participant Client as 👤 Cliente
+    participant Server as 🛡️ Servidor
+    
+    Note over Client,Server: 🔒 TLS Tradicional (Unidireccional)
+    Client->>Server: 1. ClientHello
+    Server->>Client: 2. ServerHello + Certificado del Servidor
+    Client->>Client: 3. Validar certificado del servidor
+    Client->>Server: 4. Key Exchange (encriptado)
+    Note over Client,Server: ✅ Conexión segura establecida
+    
+    Note over Client,Server: 🔐 mTLS (Bidireccional)
+    Client->>Server: 1. ClientHello
+    Server->>Client: 2. ServerHello + Certificado + CertificateRequest
+    Client->>Server: 3. Certificado del Cliente + ClientKeyExchange
+    Server->>Server: 4. Validar certificado del cliente
+    Client->>Client: 5. Validar certificado del servidor
+    Note over Client,Server: ✅ Ambos autenticados mutuamente
+```
+
+#### ¿Cuándo usar mTLS?
+
+| Escenario | Justificación | Implementación |
+|-----------|---------------|----------------|
+| **APIs críticas B2B** | Zero-trust, compliance estricto | Certificate pinning |
+| **Microservicios internos** | Service mesh security | Istio, Linkerd |
+| **Banking/Payment APIs** | PCI DSS, regulaciones financieras | Hardware Security Modules |
+| **Government/Defense** | Clasificación de seguridad | PKI governamental |
+| **IoT/Device Authentication** | Device identity, anti-tampering | Device certificates |
+| **Service-to-Service (M2M)** | Elimina shared secrets | Certificate rotation |
+
+#### Implementación mTLS en OAuth 2.0
+
+**1. Client Certificate Authentication (RFC 8705)**
+
+En lugar de `client_secret`, el cliente se autentica con certificado:
+
+```http
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+# Certificado del cliente enviado en TLS handshake
+
+grant_type=client_credentials&
+client_id=mtls-client-123&
+scope=read:users write:data
+# NO client_secret - autenticación via certificado
+```
+
+**2. Certificate-Bound Access Tokens**
+
+Los access tokens se "atan" al certificado del cliente:
+
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "cnf": {
+    "x5t#S256": "bwcK0esc3ACC3DB2Y5_lESsXE8o9ltc05O89jdN-dg2"
+  }
+}
+```
+
+#### Configuración mTLS paso a paso
+
+**1. Generar Certificate Authority (CA)**
+```bash
+# Crear CA privada
+openssl genrsa -out ca-key.pem 4096
+
+# Crear certificado CA
+openssl req -new -x509 -days 365 -key ca-key.pem -out ca-cert.pem \
+  -subj "/CN=MyCompany Root CA/O=MyCompany Inc/C=US"
+```
+
+**2. Generar certificados de servidor**
+```bash
+# Clave privada del servidor
+openssl genrsa -out server-key.pem 4096
+
+# Certificate Signing Request (CSR)
+openssl req -new -key server-key.pem -out server.csr \
+  -subj "/CN=api.mycompany.com/O=MyCompany Inc/C=US"
+
+# Certificado del servidor firmado por CA
+openssl x509 -req -days 365 -in server.csr -CA ca-cert.pem \
+  -CAkey ca-key.pem -CAcreateserial -out server-cert.pem
+```
+
+**3. Generar certificados de cliente**
+```bash
+# Clave privada del cliente
+openssl genrsa -out client-key.pem 4096
+
+# CSR del cliente
+openssl req -new -key client-key.pem -out client.csr \
+  -subj "/CN=service-a/O=MyCompany Inc/C=US"
+
+# Certificado del cliente firmado por CA
+openssl x509 -req -days 365 -in client.csr -CA ca-cert.pem \
+  -CAkey ca-key.pem -CAcreateserial -out client-cert.pem
+```
+
+#### Implementación en Node.js/Express
+
+**Servidor con mTLS requerido:**
+```javascript
+const https = require('https');
+const fs = require('fs');
+const express = require('express');
+
+const app = express();
+
+// Configuración mTLS
+const httpsOptions = {
+  key: fs.readFileSync('server-key.pem'),
+  cert: fs.readFileSync('server-cert.pem'),
+  ca: fs.readFileSync('ca-cert.pem'),
+  requestCert: true,        // 🔐 Requerir certificado del cliente
+  rejectUnauthorized: true  // 🚫 Rechazar clientes sin certificado válido
+};
+
+// Middleware para extraer información del certificado
+app.use((req, res, next) => {
+  if (req.client.authorized) {
+    const cert = req.connection.getPeerCertificate();
+    req.clientCert = {
+      subject: cert.subject,
+      issuer: cert.issuer,
+      serialNumber: cert.serialNumber,
+      fingerprint: cert.fingerprint
+    };
+    console.log('✅ Cliente autenticado:', cert.subject.CN);
+  } else {
+    console.log('❌ Cliente no autorizado:', req.client.authorizationError);
+    return res.status(401).json({error: 'Invalid client certificate'});
+  }
+  next();
+});
+
+// Endpoint OAuth token con mTLS
+app.post('/oauth/token', (req, res) => {
+  const { grant_type, client_id, scope } = req.body;
+  
+  // Validar que el CN del certificado coincida con client_id
+  if (req.clientCert.subject.CN !== client_id) {
+    return res.status(400).json({
+      error: 'invalid_client',
+      error_description: 'Certificate CN does not match client_id'
+    });
+  }
+  
+  // Generar access token con certificate binding
+  const accessToken = generateCertificateBoundToken(req.clientCert);
+  
+  res.json({
+    access_token: accessToken,
+    token_type: 'Bearer',
+    expires_in: 3600,
+    scope: scope
+  });
+});
+
+https.createServer(httpsOptions, app).listen(8443, () => {
+  console.log('🔐 mTLS server running on https://localhost:8443');
+});
+```
+
+**Cliente con mTLS:**
+```javascript
+const https = require('https');
+const fs = require('fs');
+const querystring = require('querystring');
+
+// Configuración del cliente mTLS
+const clientOptions = {
+  hostname: 'api.mycompany.com',
+  port: 8443,
+  method: 'POST',
+  path: '/oauth/token',
+  key: fs.readFileSync('client-key.pem'),
+  cert: fs.readFileSync('client-cert.pem'),
+  ca: fs.readFileSync('ca-cert.pem'),
+  checkServerIdentity: (host, cert) => {
+    // Validación adicional del certificado del servidor
+    console.log('🔍 Validating server cert:', cert.subject);
+  }
+};
+
+// Request data
+const postData = querystring.stringify({
+  grant_type: 'client_credentials',
+  client_id: 'service-a',
+  scope: 'read:users write:data'
+});
+
+// Realizar request con mTLS
+const req = https.request(clientOptions, (res) => {
+  let data = '';
+  res.on('data', chunk => data += chunk);
+  res.on('end', () => {
+    if (res.statusCode === 200) {
+      const tokens = JSON.parse(data);
+      console.log('✅ Tokens received:', tokens);
+    } else {
+      console.log('❌ Error:', res.statusCode, data);
+    }
+  });
+});
+
+req.write(postData);
+req.end();
+```
+
+#### mTLS en Service Mesh (Istio)
+
+**Configuración automática:**
+```yaml
+# destination-rule.yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api-service-mtls
+spec:
+  host: api-service
+  trafficPolicy:
+    tls:
+      mode: ISTIO_MUTUAL  # 🔐 mTLS automático
+---
+# peer-authentication.yaml
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: require-mtls
+spec:
+  mtls:
+    mode: STRICT  # 🚫 Rechazar conexiones no-mTLS
+```
+
+#### Ventajas y Desventajas de mTLS
+
+| Ventajas ✅ | Desventajas ❌ |
+|-------------|----------------|
+| **Strong authentication**: Certificados > passwords | **Complexity**: PKI management overhead |
+| **Non-repudiation**: Audit trail completo | **Certificate rotation**: Operational burden |
+| **Zero-trust**: No shared secrets | **Client compatibility**: Not all clients support |
+| **Compliance**: Meets strict regulations | **Performance**: Additional handshake overhead |
+| **Mutual verification**: Both parties authenticated | **Debugging**: Complex troubleshooting |
+
+#### mTLS vs Otras Autenticaciones
+
+| Método | Seguridad | Complejidad | Casos de Uso |
+|--------|-----------|-------------|--------------|
+| **API Keys** | 🔶 Media | 🟢 Baja | APIs públicas, desarrollo |
+| **Client Secret** | 🔶 Media | 🟢 Baja | Applications confidenciales |
+| **JWT Signed** | 🟡 Alta | 🔶 Media | Microservicios, federation |
+| **mTLS** | 🟢 Muy Alta | 🔴 Alta | Banking, government, critical B2B |
+| **OAuth + mTLS** | 🟢 Máxima | 🔴 Alta | Enterprise grade, compliance |
+
+#### Casos de Uso Reales
+
+**Banking API (PCI DSS compliance):**
+```
+Payment Processor ←→ Bank API
+├── mTLS certificate authentication
+├── Certificate-bound access tokens  
+├── Hardware Security Module (HSM)
+└── Certificate rotation every 90 days
+```
+
+**Microservices (Service Mesh):**
+```
+Service A ←→ Service B ←→ Service C
+├── Istio automatic mTLS
+├── Workload identity certificates
+├── Policy enforcement (zero-trust)
+└── Observability & audit logs
+```
+
+**IoT Device Management:**
+```
+IoT Device ←→ Device Management API
+├── Device-specific certificates
+├── Certificate-based device identity
+├── Secure firmware updates via mTLS
+└── Certificate lifecycle management
+```
+
+### �🔒 Mejores Prácticas de Seguridad
 
 #### Configuración de Tokens
 

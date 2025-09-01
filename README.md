@@ -297,7 +297,428 @@ graph TB
 }
 ```
 
-### 🛡️ PKCE (Proof Key for Code Exchange)
+### � Almacenamiento de Tokens por Escenario
+
+La **ubicación y forma de almacenar tokens** es crítica para la seguridad y debe elegirse según el tipo de aplicación y flujo OAuth 2.0 utilizado.
+
+#### Matriz de Almacenamiento por Escenario
+
+| Escenario | Tipo Cliente | Access Token | ID Token | Refresh Token | Session Data | Ubicación Recomendada |
+|-----------|--------------|--------------|-----------|---------------|--------------|----------------------|
+| **Authorization Code** | Confidencial | Backend | Backend | Backend | Cookies HttpOnly | 🛡️ Servidor + Cookies |
+| **Auth Code + PKCE** | Público | Frontend | Frontend | Frontend | LocalStorage/Memory | 📱 Cliente (con precauciones) |
+| **Client Credentials** | Confidencial | Backend | N/A | N/A | Cache/DB | 🖥️ Servidor/Cache |
+| **Implicit** ⚠️ | Público | Frontend | Frontend | N/A | Memory only | ⚠️ Solo memoria |
+| **ROPC** ❌ | Variable | Depende | Depende | Depende | Depende | ❌ Evitar uso |
+
+#### 🔐 Authorization Code (BFF Pattern)
+
+**Almacenamiento óptimo para máxima seguridad:**
+
+```mermaid
+graph TB
+    subgraph "Frontend (React)"
+        Browser[🌐 Navegador]
+        Cookies[🍪 HttpOnly Cookies<br/>session_id only]
+    end
+    
+    subgraph "Backend (BFF Server)"
+        Memory[💾 Memory Store]
+        Database[🗄️ Database/Redis]
+        AccessToken[🎫 Access Tokens]
+        RefreshToken[🔄 Refresh Tokens]
+        IDToken[👤 ID Tokens]
+    end
+    
+    Browser --> Cookies
+    Cookies --> Memory
+    Memory --> AccessToken
+    Memory --> RefreshToken
+    Memory --> IDToken
+    Memory --> Database
+    
+    style AccessToken fill:#4caf50
+    style RefreshToken fill:#2196f3
+    style IDToken fill:#ff9800
+    style Cookies fill:#e8f5e8
+```
+
+**Implementación:**
+```javascript
+// Backend: Almacenamiento seguro
+const sessions = new Map(); // o Redis en producción
+
+app.post('/callback', async (req, res) => {
+  const { code } = req.query;
+  
+  // Intercambiar code por tokens
+  const tokens = await exchangeCodeForTokens(code);
+  
+  // Generar session ID
+  const sessionId = crypto.randomUUID();
+  
+  // Almacenar tokens en servidor
+  sessions.set(sessionId, {
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    idToken: tokens.id_token,
+    expiresAt: Date.now() + (tokens.expires_in * 1000)
+  });
+  
+  // Solo enviar session ID al navegador
+  res.cookie('session_id', sessionId, {
+    httpOnly: true,    // 🛡️ No accesible via JS
+    secure: true,      // 🔒 Solo HTTPS
+    sameSite: 'Lax',   // 🚫 Protección CSRF
+    maxAge: 3600000    // ⏰ 1 hora
+  });
+  
+  res.redirect('/dashboard');
+});
+```
+
+#### 📱 Authorization Code + PKCE (SPA Pattern)
+
+**Almacenamiento en cliente público con medidas de seguridad:**
+
+```mermaid
+graph TB
+    subgraph "SPA Frontend"
+        Browser[🌐 Navegador]
+        Memory[💾 Memory/Variables]
+        SessionStorage[💿 SessionStorage]
+        LocalStorage[💾 LocalStorage]
+        IndexedDB[🗃️ IndexedDB]
+    end
+    
+    subgraph "Tokens"
+        AccessToken[🎫 Access Token<br/>Memory preferido]
+        IDToken[👤 ID Token<br/>Memory preferido]
+        RefreshToken[🔄 Refresh Token<br/>Secure storage]
+    end
+    
+    Browser --> Memory
+    Browser --> SessionStorage
+    Browser --> LocalStorage
+    Browser --> IndexedDB
+    
+    Memory --> AccessToken
+    Memory --> IDToken
+    SessionStorage --> RefreshToken
+    
+    style Memory fill:#4caf50
+    style SessionStorage fill:#ff9800
+    style LocalStorage fill:#f44336
+    style AccessToken fill:#4caf50
+    style RefreshToken fill:#2196f3
+```
+
+**Opciones de almacenamiento (de más a menos seguro):**
+
+| Ubicación | Access Token | ID Token | Refresh Token | Pros | Contras |
+|-----------|--------------|-----------|---------------|------|---------|
+| **Memory (Variables)** | ✅ Recomendado | ✅ Recomendado | 🔶 Temporal | • No persistente<br/>• Inmune a XSS | • Se pierde al reload<br/>• No sobrevive tabs |
+| **SessionStorage** | 🔶 Aceptable | 🔶 Aceptable | ✅ Recomendado | • Por pestaña<br/>• Mejor que localStorage | • Vulnerable a XSS<br/>• Visible en DevTools |
+| **LocalStorage** | ❌ No recomendado | ❌ No recomendado | 🔶 Último recurso | • Persistente<br/>• Cross-tab | • Muy vulnerable XSS<br/>• Visible en DevTools |
+| **IndexedDB** | 🔶 Con encriptación | 🔶 Con encriptación | ✅ Con encriptación | • Encriptación posible<br/>• Más control | • Complejidad alta<br/>• Aún vulnerable XSS |
+
+**Implementación segura en SPA:**
+```javascript
+// Token manager para SPA
+class SecureTokenManager {
+  constructor() {
+    this.accessToken = null;     // 💾 Solo en memoria
+    this.idToken = null;         // 💾 Solo en memoria
+    this.refreshToken = null;    // 💿 SessionStorage encriptado
+  }
+  
+  // Almacenar tokens después del login
+  setTokens(tokens) {
+    // Access e ID tokens solo en memoria
+    this.accessToken = tokens.access_token;
+    this.idToken = tokens.id_token;
+    
+    // Refresh token encriptado en sessionStorage
+    if (tokens.refresh_token) {
+      const encrypted = this.encrypt(tokens.refresh_token);
+      sessionStorage.setItem('rt', encrypted);
+    }
+  }
+  
+  // Obtener access token válido
+  async getValidAccessToken() {
+    // Si el token existe y no está vencido
+    if (this.accessToken && !this.isTokenExpired(this.accessToken)) {
+      return this.accessToken;
+    }
+    
+    // Si no, intentar renovar con refresh token
+    return await this.refreshAccessToken();
+  }
+  
+  // Renovar tokens
+  async refreshAccessToken() {
+    const encryptedRT = sessionStorage.getItem('rt');
+    if (!encryptedRT) {
+      throw new Error('No refresh token available');
+    }
+    
+    const refreshToken = this.decrypt(encryptedRT);
+    const newTokens = await this.auth0.refreshTokens(refreshToken);
+    
+    this.setTokens(newTokens);
+    return this.accessToken;
+  }
+  
+  // Limpiar todos los tokens
+  logout() {
+    this.accessToken = null;
+    this.idToken = null;
+    this.refreshToken = null;
+    sessionStorage.removeItem('rt');
+  }
+  
+  // Encriptación simple para refresh token
+  encrypt(text) {
+    // Implementar encriptación real en producción
+    return btoa(text); // Solo ejemplo
+  }
+  
+  decrypt(encrypted) {
+    return atob(encrypted); // Solo ejemplo
+  }
+}
+```
+
+#### 🤖 Client Credentials (M2M Pattern)
+
+**Almacenamiento para servicios automatizados:**
+
+```mermaid
+graph TB
+    subgraph "Service/API"
+        App[🖥️ Aplicación]
+        Cache[⚡ Cache Layer<br/>Redis/Memcached]
+        Database[🗄️ Database<br/>PostgreSQL/MongoDB]
+        Memory[💾 Application Memory]
+    end
+    
+    subgraph "Token Storage"
+        AccessToken[🎫 Access Token<br/>Cache + TTL]
+        ClientCreds[🔐 Client Credentials<br/>Env Variables/Vault]
+    end
+    
+    App --> Memory
+    App --> Cache
+    App --> Database
+    Memory --> AccessToken
+    Cache --> AccessToken
+    Database --> ClientCreds
+    
+    style Cache fill:#4caf50
+    style Memory fill:#ff9800
+    style AccessToken fill:#4caf50
+    style ClientCreds fill:#2196f3
+```
+
+**Implementación con cache automático:**
+```javascript
+// Token manager para M2M
+class M2MTokenManager {
+  constructor() {
+    this.redis = new Redis(process.env.REDIS_URL);
+    this.clientId = process.env.AUTH0_CLIENT_ID;
+    this.clientSecret = process.env.AUTH0_CLIENT_SECRET;
+  }
+  
+  async getValidAccessToken() {
+    const cacheKey = `m2m_token:${this.clientId}`;
+    
+    // Intentar obtener del cache
+    let token = await this.redis.get(cacheKey);
+    if (token) {
+      return token;
+    }
+    
+    // Si no está en cache, solicitar nuevo token
+    token = await this.requestNewToken();
+    
+    // Guardar en cache con TTL
+    const ttl = 3600 - 300; // 5 min antes de expirar
+    await this.redis.setex(cacheKey, ttl, token);
+    
+    return token;
+  }
+  
+  async requestNewToken() {
+    const response = await fetch('https://tenant.auth0.com/oauth/token', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        grant_type: 'client_credentials',
+        client_id: this.clientId,
+        client_secret: this.clientSecret,
+        audience: process.env.AUTH0_AUDIENCE
+      })
+    });
+    
+    const data = await response.json();
+    return data.access_token;
+  }
+}
+```
+
+#### ⚠️ Comparación de Vulnerabilidades por Almacenamiento
+
+| Ubicación | XSS Risk | CSRF Risk | Theft Risk | Network Risk | Recomendado Para |
+|-----------|----------|-----------|------------|--------------|------------------|
+| **HttpOnly Cookies** | ✅ Protegido | ✅ Con SameSite | ✅ Protegido | 🔶 HTTPS only | Authorization Code |
+
+#### 🧪 **Demostración: HttpOnly vs DevTools**
+
+**Configuración de cookies para testing:**
+```javascript
+// Backend: Configurar diferentes tipos de cookies
+app.get('/set-test-cookies', (req, res) => {
+  // Cookie normal (accesible desde JavaScript)
+  res.cookie('normal_cookie', 'visible_to_js', {
+    secure: true,
+    sameSite: 'Lax'
+  });
+  
+  // Cookie HttpOnly (NO accesible desde JavaScript)
+  res.cookie('session_id', 'secret_session_token', {
+    httpOnly: true,    // 🛡️ Esta es la clave
+    secure: true,
+    sameSite: 'Lax'
+  });
+  
+  res.json({message: 'Cookies set for testing'});
+});
+```
+
+**Testing en el navegador:**
+```javascript
+// En la consola del navegador:
+console.log('document.cookie:', document.cookie);
+// Resultado: "normal_cookie=visible_to_js"
+// ❌ NO incluye: "session_id=secret_session_token"
+
+// Verificar en DevTools:
+// 1. F12 → Application → Cookies
+// 2. Verás AMBAS cookies listadas
+// 3. La cookie HttpOnly tendrá una marca ✅ en la columna "HttpOnly"
+```
+
+**Intento de modificación:**
+```javascript
+// Intentar sobrescribir cookie HttpOnly
+document.cookie = "session_id=hacked_value; path=/";
+
+// Verificar resultado
+console.log(document.cookie);
+// ❌ Aún NO aparece session_id
+// ✅ En DevTools verás que session_id mantiene su valor original
+```
+
+#### 🔬 **Casos de Testing Comunes**
+
+**1. Debugging de autenticación:**
+```javascript
+// Para desarrolladores: verificar si las cookies están configuradas
+function debugCookies() {
+  console.log('Cookies accesibles por JS:', document.cookie);
+  console.log('⚠️ Cookies HttpOnly NO aparecen arriba');
+  console.log('👀 Verificar en DevTools → Application → Cookies');
+}
+```
+
+**2. Verificar configuración de seguridad:**
+```javascript
+// Función para validar configuración (solo desarrollo)
+function validateCookieSecurity() {
+  const allCookies = document.cookie.split(';');
+  
+  console.log('🔍 Cookies visibles por JavaScript:');
+  allCookies.forEach(cookie => {
+    const [name, value] = cookie.trim().split('=');
+    console.log(`  ${name}: ${value}`);
+  });
+  
+  console.log('');
+  console.log('✅ Si no ves cookies de sesión aquí = Configuración correcta');
+  console.log('❌ Si ves tokens/sessions aquí = PROBLEMA DE SEGURIDAD');
+}
+```
+
+#### 🎯 **Mejores Prácticas de Testing**
+
+**Para Desarrolladores:**
+```bash
+✅ DO:
+- Usar DevTools para verificar cookies HttpOnly
+- Testear que JavaScript NO puede acceder a tokens
+- Verificar flags de seguridad (Secure, SameSite)
+- Probar logout limpia todas las cookies
+
+❌ DON'T:
+- Depender de console.log para ver todas las cookies
+- Asumir que invisible = no existe
+- Testear solo en HTTP (usar HTTPS)
+- Ignorar warnings de SameSite en consola
+```
+| **Memory/Variables** | ✅ Protegido | ✅ N/A | ✅ Protegido | ✅ No network | SPAs (temporal) |
+| **SessionStorage** | ❌ Vulnerable | ✅ N/A | 🔶 Medio | ✅ No network | SPAs (refresh tokens) |
+| **LocalStorage** | ❌ Muy vulnerable | ✅ N/A | ❌ Alto | ✅ No network | ❌ Evitar |
+| **Server Memory** | ✅ Protegido | ✅ Protegido | ✅ Protegido | 🔶 HTTPS only | Backends |
+| **Server DB/Cache** | ✅ Protegido | ✅ Protegido | ✅ Con encriptación | 🔶 HTTPS only | M2M, Enterprise |
+
+#### 🔧 Mejores Prácticas por Escenario
+
+**Authorization Code (BFF):**
+```bash
+✅ DO:
+- Almacenar todos los tokens en el servidor
+- Usar cookies HttpOnly para session ID
+- Implementar session timeout
+- Usar Redis/Database para escalabilidad
+
+❌ DON'T:
+- Enviar tokens al navegador
+- Usar localStorage para sesiones
+- Almacenar client_secret en frontend
+```
+
+**Authorization Code + PKCE (SPA):**
+```bash
+✅ DO:
+- Access tokens en memoria cuando sea posible
+- Refresh tokens en sessionStorage encriptados
+- Implementar token rotation
+- Usar secure storage libraries
+
+❌ DON'T:
+- Almacenar tokens en localStorage
+- Mantener tokens después de logout
+- Ignorar token expiration
+```
+
+**Client Credentials (M2M):**
+```bash
+✅ DO:
+- Cache tokens con TTL apropiado
+- Usar secret managers para credenciales
+- Implementar retry logic
+- Monitorear token usage
+
+❌ DON'T:
+- Hardcodear client secrets
+- Solicitar tokens en cada request
+- Ignorar rate limits
+- Almacenar credenciales en logs
+```
+
+### �🛡️ PKCE (Proof Key for Code Exchange)
 
 PKCE (RFC 7636) es una extensión de OAuth 2.0 que proporciona protección adicional para clientes públicos.
 

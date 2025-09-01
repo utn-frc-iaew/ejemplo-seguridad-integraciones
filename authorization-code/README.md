@@ -248,11 +248,82 @@ app.use(session({
 
 // Middleware de autenticación
 function requireAuth(req, res, next) {
-  if (!req.session.user) {
-    return res.status(401).json({error: 'Not authenticated'});
+  if (!req.session.tokens) {
+    return res.status(401).json({ error: 'Authentication required' });
   }
   next();
 }
+```
+
+#### 🧪 **¿Qué verás en Chrome DevTools? - `connect.sid` Explicado**
+
+Cuando ejecutes este ejemplo y abras **Chrome DevTools** (F12 → Application → Cookies), verás una cookie llamada `connect.sid`. **Esto es NORMAL y SEGURO**.
+
+**¿Qué es `connect.sid`?**
+- Es la **cookie de sesión automática** que crea Express.js
+- Contiene un **identificador de sesión**, NO los tokens OAuth
+- Los tokens reales están seguros en el servidor
+
+**Estructura de `connect.sid`:**
+```javascript
+// Lo que ves en DevTools:
+connect.sid = s%3Aabcd1234-5678-9012-3456-789abcdef012.hash
+
+// Decodificado:
+├── s%3A = URL encoding de "s:" (session prefix)
+├── abcd1234-5678-9012-3456-789abcdef012 = Session ID único
+└── hash = Firma HMAC para prevenir tampering
+```
+
+**✅ Verificar que está configurado correctamente:**
+
+| Atributo en DevTools | Valor Esperado | Significado |
+|---------------------|----------------|-------------|
+| **HttpOnly** | ✅ true | No accesible desde JavaScript |
+| **Secure** | ✅ true (en HTTPS) | Solo se envía por HTTPS |
+| **SameSite** | Lax o Strict | Protección contra CSRF |
+| **Domain** | localhost | Limitado al dominio |
+| **Path** | / | Disponible en toda la app |
+
+**🧪 Prueba de Seguridad:**
+```javascript
+// Ejecutar en la consola del navegador:
+console.log('Cookies accesibles:', document.cookie);
+// ❌ connect.sid NO debe aparecer en el resultado
+// ✅ Si no aparece = configuración correcta
+
+// Para verificar que existe:
+// F12 → Application → Cookies → localhost:4000
+// Ahí SÍ verás connect.sid con HttpOnly=true
+```
+
+**🔄 Flujo de Sesión con `connect.sid`:**
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as Session Store
+    participant T as Token Store
+    
+    Note over B,T: 1. Login exitoso
+    B->>S: Recibe connect.sid cookie
+    S->>T: Session ID vincula con OAuth tokens
+    
+    Note over B,T: 2. Request autenticado
+    B->>S: Envía connect.sid automáticamente
+    S->>T: Busca tokens por session ID
+    T->>S: Devuelve access_token válido
+    S->>B: Proxy request a API con Bearer token
+```
+
+**❓ FAQ sobre `connect.sid`:**
+
+| Pregunta | Respuesta |
+|----------|-----------|
+| **¿Es seguro ver `connect.sid`?** | ✅ Sí, es solo un identificador de sesión |
+| **¿Contiene mi access token?** | ❌ No, los tokens están en el servidor |
+| **¿Puede un XSS robar `connect.sid`?** | ❌ No, está protegido por HttpOnly |
+| **¿Debo preocuparme por esto?** | ❌ No, es el comportamiento estándar |
+| **¿Puedo cambiar el nombre?** | ✅ Sí, usar `name: 'mi-sesion'` en config |
 
 // Endpoint protegido
 app.get('/api/profile', requireAuth, (req, res) => {

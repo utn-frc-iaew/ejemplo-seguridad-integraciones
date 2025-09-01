@@ -576,6 +576,34 @@ class M2MTokenManager {
 
 #### 🧪 **Demostración: HttpOnly vs DevTools**
 
+**¿Qué es `connect.sid`?**
+
+Cuando veas una cookie llamada `connect.sid` en Chrome DevTools, es la **cookie de sesión automática de Express.js**:
+
+```javascript
+// Express.js crea automáticamente esta cookie cuando usas sessions
+app.use(session({
+  secret: 'your-secret-key',
+  name: 'connect.sid',  // 👈 Nombre por defecto
+  cookie: {
+    httpOnly: true,     // 🛡️ Automáticamente protegida
+    secure: false,      // 🔓 false para desarrollo HTTP
+    maxAge: 3600000     // ⏰ 1 hora
+  }
+}));
+
+// Estructura de connect.sid en Chrome:
+// connect.sid = s%3A[session-id].[signature]
+//   ├── s%3A = URL encoding de "s:"
+//   ├── [session-id] = ID único de sesión
+//   └── [signature] = Firma HMAC para validación
+```
+
+**✅ Esto es CORRECTO y SEGURO:**
+- `connect.sid` contiene solo un identificador de sesión
+- Los tokens OAuth reales están seguros en el servidor
+- La cookie está marcada como `HttpOnly=true`
+
 **Configuración de cookies para testing:**
 ```javascript
 // Backend: Configurar diferentes tipos de cookies
@@ -602,11 +630,13 @@ app.get('/set-test-cookies', (req, res) => {
 // En la consola del navegador:
 console.log('document.cookie:', document.cookie);
 // Resultado: "normal_cookie=visible_to_js"
-// ❌ NO incluye: "session_id=secret_session_token"
+// ❌ NO incluye: "connect.sid" o "session_id"
 
 // Verificar en DevTools:
-// 1. F12 → Application → Cookies
-// 2. Verás AMBAS cookies listadas
+// 1. F12 → Application → Cookies → localhost:4001
+// 2. Verás cookies como:
+//    • normal_cookie=visible_to_js (❌ Sin HttpOnly)
+//    • connect.sid=s%3A[hash] (✅ HttpOnly=true)
 // 3. La cookie HttpOnly tendrá una marca ✅ en la columna "HttpOnly"
 ```
 
@@ -623,17 +653,31 @@ console.log(document.cookie);
 
 #### 🔬 **Casos de Testing Comunes**
 
-**1. Debugging de autenticación:**
+**1. Identificar cookies de Express.js:**
+```javascript
+// La cookie "connect.sid" es el session ID de Express
+// Estructura: s%3A[session-data].[signature]
+console.log('Cookies en DevTools:');
+console.log('• connect.sid = Cookie de sesión de Express (HttpOnly)');
+console.log('• normal_cookie = Cookie accesible por JavaScript');
+console.log('');
+console.log('✅ Si connect.sid NO aparece en document.cookie = Configuración correcta');
+```
+
+**2. Debugging de autenticación:**
+```javascript
+// Para desarrolladores: verificar si las cookies están configuradas
+**2. Debugging de autenticación:**
 ```javascript
 // Para desarrolladores: verificar si las cookies están configuradas
 function debugCookies() {
   console.log('Cookies accesibles por JS:', document.cookie);
-  console.log('⚠️ Cookies HttpOnly NO aparecen arriba');
-  console.log('👀 Verificar en DevTools → Application → Cookies');
+  console.log('⚠️ Cookies HttpOnly (connect.sid, session_id) NO aparecen arriba');
+  console.log('👀 Verificar en DevTools → Application → Cookies → localhost:4001');
 }
 ```
 
-**2. Verificar configuración de seguridad:**
+**3. Verificar configuración de seguridad:**
 ```javascript
 // Función para validar configuración (solo desarrollo)
 function validateCookieSecurity() {
@@ -657,15 +701,46 @@ function validateCookieSecurity() {
 ```bash
 ✅ DO:
 - Usar DevTools para verificar cookies HttpOnly
+- Entender que connect.sid es normal y seguro
 - Testear que JavaScript NO puede acceder a tokens
 - Verificar flags de seguridad (Secure, SameSite)
 - Probar logout limpia todas las cookies
 
 ❌ DON'T:
+- Preocuparse por ver connect.sid en DevTools
 - Depender de console.log para ver todas las cookies
 - Asumir que invisible = no existe
 - Testear solo en HTTP (usar HTTPS)
 - Ignorar warnings de SameSite en consola
+```
+
+**📋 Checklist de Cookies Seguras:**
+
+| Cookie | Visible en `document.cookie` | HttpOnly | Propósito | Estado |
+|--------|------------------------------|----------|-----------|--------|
+| `connect.sid` | ❌ No | ✅ Sí | Session ID de Express | ✅ Correcto |
+| `normal_cookie` | ✅ Sí | ❌ No | Testing/preferences | ⚠️ No para tokens |
+| `session_id` (custom) | ❌ No | ✅ Sí | Custom session ID | ✅ Correcto |
+| `access_token` | ❌ NUNCA | ✅ Obligatorio | OAuth token | 🚫 NO usar cookies |
+
+**🔍 Comando de Debugging Rápido:**
+```javascript
+// Ejecutar en consola del navegador para debugging
+function auditCookies() {
+  console.log('🍪 AUDIT DE COOKIES DE SEGURIDAD');
+  console.log('=====================================');
+  console.log('📱 Cookies accesibles por JavaScript:');
+  console.log(document.cookie || '(ninguna)');
+  console.log('');
+  console.log('🛡️ Para ver cookies HttpOnly (connect.sid, session_id):');
+  console.log('   F12 → Application → Cookies → ' + location.hostname);
+  console.log('');
+  console.log('✅ Si NO ves tokens/sessions arriba = Configuración SEGURA');
+  console.log('❌ Si ves tokens/sessions arriba = PROBLEMA DE SEGURIDAD');
+}
+
+// Ejecutar audit
+auditCookies();
 ```
 | **Memory/Variables** | ✅ Protegido | ✅ N/A | ✅ Protegido | ✅ No network | SPAs (temporal) |
 | **SessionStorage** | ❌ Vulnerable | ✅ N/A | 🔶 Medio | ✅ No network | SPAs (refresh tokens) |
